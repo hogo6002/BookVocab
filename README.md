@@ -13,6 +13,19 @@ It lets you:
 - browse results by chapter range
 - export JSON or CSV
 
+## Deploy
+
+This project uses Azure Container Registry and Azure Container Apps.
+
+```bash
+./deploy.sh
+```
+
+The script:
+- builds the Docker image in Azure Container Registry
+- pushes `bookvocab.azurecr.io/bookvocab:latest`
+- updates the Azure Container App
+
 ## Run locally
 
 ```bash
