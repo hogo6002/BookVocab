@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/
+
+# macOS
+.DS_Store
+
+# Local secrets / env files
+.env
+.env.*
+
+# User-uploaded books and archives
+*.epub
+*.zip
+
+# Generated exports / temp files
+epub_vocabulary_analysis.json
+epub_oov_words.csv
+*.log
+tmp/
+temp/
