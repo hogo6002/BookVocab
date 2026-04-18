@@ -8,7 +8,7 @@ It lets you:
 - surface likely unknown words
 - hide noisy tokens and front matter
 - browse results by chapter range
-- export JSON or CSV
+- export Anki TSV or CSV
 
 ## Deploy
 
@@ -20,7 +20,7 @@ This project uses Azure Container Registry and Azure Container Apps.
 
 The script:
 - builds the Docker image in Azure Container Registry
-- pushes `bookvocab.azurecr.io/bookvocab:latest`
+- pushes a unique image tag such as `bookvocab.azurecr.io/bookvocab:<git-sha>`
 - updates the Azure Container App
 
 ## Run locally

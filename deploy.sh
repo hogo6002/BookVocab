@@ -7,7 +7,7 @@ APP_NAME="bookvocabapp"
 RESOURCE_GROUP="book_vocab"
 REGISTRY_NAME="bookvocab"
 IMAGE_NAME="bookvocab"
-IMAGE_TAG="latest"
+IMAGE_TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)"
 IMAGE_REF="${REGISTRY_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo "Building and pushing ${IMAGE_REF} to ACR..."
