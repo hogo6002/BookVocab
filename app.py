@@ -188,19 +188,9 @@ if "ui_lang" not in st.session_state:
 current_lang = st.session_state["ui_lang"]
 
 
-def sync_vocab_size_from_level() -> None:
-    level = st.session_state.get("cefr_level_choice", "B2")
-    st.session_state["estimated_vocab_size"] = CEFR_TO_WORD_SIZE.get(
-        level, CEFR_TO_WORD_SIZE["B2"]
-    )
-
-
-def sync_level_from_vocab_size() -> None:
-    size = int(st.session_state.get("estimated_vocab_size", CEFR_TO_WORD_SIZE["B2"]))
+def closest_cefr_level(size: int) -> str:
     levels = list(CEFR_TO_WORD_SIZE.items())
-    st.session_state["cefr_level_choice"] = min(
-        levels, key=lambda item: abs(item[1] - size)
-    )[0]
+    return min(levels, key=lambda item: abs(item[1] - size))[0]
 
 
 def reading_fit_from_coverage(coverage: float) -> str:
@@ -456,31 +446,38 @@ st.info(t("sidebar_tip"))
 uploaded_epub = st.file_uploader(t("epub_file"), type=["epub", "zip"])
 cefr_level = None
 
+if "cefr_level_pref" not in st.session_state:
+    st.session_state["cefr_level_pref"] = "C1"
+if "estimated_vocab_pref" not in st.session_state:
+    st.session_state["estimated_vocab_pref"] = CEFR_TO_WORD_SIZE["C1"]
+
 with st.sidebar:
     st.header(t("sidebar_title"))
     st.caption(t("sidebar_caption"))
-    if "cefr_level_choice" not in st.session_state:
-        st.session_state["cefr_level_choice"] = "C1"
-    if "estimated_vocab_size" not in st.session_state:
-        st.session_state["estimated_vocab_size"] = 12000
+    cefr_level_options = list(CEFR_TO_WORD_SIZE.keys())
     cefr_level = st.selectbox(
         t("english_level"),
-        list(CEFR_TO_WORD_SIZE.keys()),
-        index=list(CEFR_TO_WORD_SIZE.keys()).index(
-            st.session_state["cefr_level_choice"]
-        ),
-        key="cefr_level_choice",
-        on_change=sync_vocab_size_from_level,
+        cefr_level_options,
+        index=cefr_level_options.index(st.session_state["cefr_level_pref"]),
     )
+    st.session_state["cefr_level_pref"] = cefr_level
+    expected_vocab_size = CEFR_TO_WORD_SIZE.get(cefr_level, CEFR_TO_WORD_SIZE["C1"])
     vocab_size = st.slider(
         t("estimated_vocab_size"),
         1000,
         MAX_KNOWN_WORD_SIZE,
-        value=st.session_state["estimated_vocab_size"],
-        key="estimated_vocab_size",
+        value=st.session_state["estimated_vocab_pref"],
         step=1000,
-        on_change=sync_level_from_vocab_size,
     )
+    if vocab_size != st.session_state["estimated_vocab_pref"]:
+        st.session_state["estimated_vocab_pref"] = vocab_size
+        cefr_level = closest_cefr_level(vocab_size)
+        st.session_state["cefr_level_pref"] = cefr_level
+        st.rerun()
+    elif expected_vocab_size != st.session_state["estimated_vocab_pref"]:
+        st.session_state["estimated_vocab_pref"] = expected_vocab_size
+        st.session_state["cefr_level_pref"] = cefr_level
+        st.rerun()
     st.caption(
         f"{t('english_level')}: {cefr_level} · {t('estimated_vocab_size')}: {vocab_size:,}"
     )
