@@ -1,5 +1,8 @@
 # BookVocab
 
+## Live Demo
+Live app: `https://bookvocab.streamlit.app/`
+
 Streamlit app for EPUB vocabulary analysis.
 
 It lets you:
@@ -19,10 +22,6 @@ python3 -m venv .venv
 .venv/bin/python -m nltk.downloader wordnet omw-1.4
 ./run.sh
 ```
-
-## Live Demo
-
-Live app: `YOUR_DEPLOYED_URL_HERE`
 
 ## Notes
 
