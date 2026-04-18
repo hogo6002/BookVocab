@@ -182,10 +182,7 @@ def detect_browser_language() -> str:
     return "zh" if "zh" in accept_language.lower() else "en"
 
 
-if "ui_lang" not in st.session_state:
-    st.session_state["ui_lang"] = detect_browser_language()
-
-current_lang = st.session_state["ui_lang"]
+current_lang = st.session_state.get("ui_lang", "en")
 
 
 def closest_cefr_level(size: int) -> str:
@@ -325,6 +322,10 @@ def build_anki_tsv(result: dict, *, use_chinese_definition: bool, hide_undefined
                 ]
             )
     return buffer.getvalue()
+
+
+def export_text_payload(text: str) -> bytes:
+    return text.encode("utf-8")
 
 
 def flatten_oov_rows(chapters: list[dict]) -> list[dict]:
@@ -505,9 +506,6 @@ with st.sidebar:
         key="ui_lang",
         horizontal=True,
     )
-    if language != current_lang:
-        st.session_state["ui_lang"] = language
-        st.rerun()
 analysis_result: dict | None = None
 analysis_meta: dict | None = None
 
@@ -828,17 +826,21 @@ if analysis_result:
 
     st.download_button(
         t("download_anki"),
-        data=build_anki_tsv(
-            analysis_result,
-            use_chinese_definition=show_chinese_definitions,
-            hide_undefined_words=hide_undefined_words,
+        data=export_text_payload(
+            build_anki_tsv(
+                analysis_result,
+                use_chinese_definition=show_chinese_definitions,
+                hide_undefined_words=hide_undefined_words,
+            )
         ),
         file_name="epub_anki_export.tsv",
         mime="text/tab-separated-values",
+        key="download_anki",
     )
     st.download_button(
         t("download_csv"),
-        data=build_oov_csv(analysis_result),
+        data=export_text_payload(build_oov_csv(analysis_result)),
         file_name="epub_unknown_words.csv",
         mime="text/csv",
+        key="download_csv",
     )

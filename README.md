@@ -1,8 +1,5 @@
 # BookVocab
 
-## Live Demo
-Live app: `https://bookvocab.streamlit.app/`
-
 Streamlit app for EPUB vocabulary analysis.
 
 It lets you:
