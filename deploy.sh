@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-APP_NAME="bookvocab"
+APP_NAME="bookvocabapp"
 RESOURCE_GROUP="book_vocab"
 REGISTRY_NAME="bookvocab"
 IMAGE_NAME="bookvocab"
