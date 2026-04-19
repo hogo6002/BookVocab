@@ -1,6 +1,6 @@
 # BookVocab
-
 Streamlit app for EPUB vocabulary analysis.
+Website: https://bookvocabapp.com/
 
 It lets you:
 - upload an `.epub`
