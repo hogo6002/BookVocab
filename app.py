@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import re
+import time
 import tempfile
 from pathlib import Path
 
@@ -1120,8 +1121,9 @@ if analysis_result:
     )
 
     annotated_epub_bytes = st.session_state.get("annotated_epub_bytes")
+    epub_action_slot = st.empty()
     if annotated_epub_bytes:
-        st.download_button(
+        epub_action_slot.download_button(
             t("download_annotated_epub"),
             data=annotated_epub_bytes,
             file_name=annotated_epub_download_name(active_epub_name),
@@ -1130,11 +1132,13 @@ if analysis_result:
             type="primary",
         )
         st.caption(
-            "The file is ready to download. Please click the button above."
+            "The file is ready to download, please click the button above, if download fails or the file looks invalid, try again."
             if st.session_state.get("ui_lang", "en") == "en"
-            else "文件已准备好下载。请点击上面的按钮。"
+            else "文件已准备好下载，请点击上面的按钮，如果下载失败或文件无效，请再试一次。"
         )
-    elif st.button(t("prepare_annotated_epub"), key="annotated_epub_action", type="primary"):
+    elif epub_action_slot.button(
+        t("prepare_annotated_epub"), key="annotated_epub_action", type="primary"
+    ):
         if not active_epub_bytes or not active_epub_name:
             st.warning(
                 "Please upload an EPUB first."
@@ -1143,28 +1147,34 @@ if analysis_result:
             )
         else:
             try:
-                if not annotated_epub_bytes:
-                    progress = st.progress(0)
-                    with st.spinner(
-                        "Preparing annotated EPUB, please do not click elsewhere."
-                        if st.session_state.get("ui_lang", "en") == "en"
-                        else "正在生成带释义的EPUB，请勿点击其他地方。生成完请后点击下载。"
-                        ):
-                        annotated_epub_bytes = build_annotated_epub_bytes(
-                            analysis_result,
-                            source_epub_bytes=active_epub_bytes,
-                            source_epub_name=active_epub_name,
-                            use_chinese_definition=show_chinese_definitions,
-                            progress_bar=progress,
-                        )
-                        st.session_state["annotated_epub_bytes"] = annotated_epub_bytes
-                    progress.empty()
-                if annotated_epub_bytes:
-                    st.success(
-                        "Annotated EPUB is ready. Tap the download button above."
-                        if st.session_state.get("ui_lang", "en") == "en"
-                        else "带释义 EPUB 已准备好。请点击上面的下载按钮。"
+                progress = st.progress(0)
+                with st.spinner(
+                    "Preparing annotated EPUB, please do not click elsewhere."
+                    if st.session_state.get("ui_lang", "en") == "en"
+                    else "正在生成带释义的EPUB，请勿点击其他地方。生成完请后点击下载。"
+                ):
+                    annotated_epub_bytes = build_annotated_epub_bytes(
+                        analysis_result,
+                        source_epub_bytes=active_epub_bytes,
+                        source_epub_name=active_epub_name,
+                        use_chinese_definition=show_chinese_definitions,
+                        progress_bar=progress,
                     )
-                    st.rerun()
+                    time.sleep(1.5)
+                    st.session_state["annotated_epub_bytes"] = annotated_epub_bytes
+                progress.empty()
+                epub_action_slot.download_button(
+                    t("download_annotated_epub"),
+                    data=annotated_epub_bytes,
+                    file_name=annotated_epub_download_name(active_epub_name),
+                    mime="application/epub+zip",
+                    key="download_annotated_epub_ready_now",
+                    type="primary",
+                )
+                st.caption(
+                    "The file is ready to download, please click the button above, if download fails or the file looks invalid, try again."
+                    if st.session_state.get("ui_lang", "en") == "en"
+                    else "文件已准备好下载，请点击上面的按钮，如果下载失败或文件无效，请再试一次。"
+                )
             except Exception as exc:
                 st.error(friendly_failure_message("Annotated EPUB export", exc))
