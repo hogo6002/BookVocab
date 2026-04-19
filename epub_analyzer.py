@@ -43,15 +43,19 @@ from spacy.lang.en.stop_words import STOP_WORDS
 
 
 WORD_RE = re.compile(r"[a-z]+(?:'[a-z]+)?", re.IGNORECASE)
-CEFR_TO_WORD_SIZE = {
-    "A1": 1000,
-    "A2": 2000,
-    "B1": 4000,
-    "B2": 6000,
-    "C1": 12000,
-    "C2": 20000,
+IELTS_TO_WORD_SIZE = {
+    "4.0": 1000,
+    "4.5": 2000,
+    "5.0": 4000,
+    "5.5": 6000,
+    "6.0": 12000,
+    "6.5": 16000,
+    "7.0": 20000,
+    "7.5": 25000,
+    "8.0": 30000,
 }
-DEFAULT_KNOWN_WORD_SIZE = 10000
+CEFR_TO_WORD_SIZE = IELTS_TO_WORD_SIZE
+DEFAULT_KNOWN_WORD_SIZE = 12000
 MAX_KNOWN_WORD_SIZE = 30000
 
 
@@ -61,6 +65,7 @@ class ChapterResult:
     title: str
     total_words: int
     unique_words: int
+    text: str = ""
     frequencies: dict[str, int] = field(default_factory=dict)
     definitions: dict[str, str] = field(default_factory=dict)
     oov_words: list[dict[str, object]] = field(default_factory=list)
@@ -95,10 +100,15 @@ def load_spacy_model():
         nlp = spacy.blank("en")
         if "lemmatizer" not in nlp.pipe_names:
             nlp.add_pipe("lemmatizer", config={"mode": "rule"})
+        if "sentencizer" not in nlp.pipe_names:
+            nlp.add_pipe("sentencizer")
         try:
             nlp.initialize()
         except Exception:
             pass
+    else:
+        if "sentencizer" not in nlp.pipe_names:
+            nlp.add_pipe("sentencizer")
 
     nlp.max_length = max(nlp.max_length, 5_000_000)
     return nlp
@@ -281,7 +291,26 @@ def load_known_words(
     try:
         from wordfreq import top_n_list
 
-        return {normalize_word_form(word) for word in top_n_list("en", size)}, f"wordfreq top {size}"
+        collected: list[str] = []
+        seen: set[str] = set()
+        request_size = max(size * 4, 20000)
+
+        while len(collected) < size and request_size <= 200000:
+            for word in top_n_list("en", request_size):
+                normalized = normalize_word_form(word)
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                collected.append(normalized)
+                if len(collected) >= size:
+                    break
+            if len(collected) < size:
+                request_size *= 2
+
+        if len(collected) < size:
+            return set(collected), f"wordfreq top {len(collected)} unique normalized words"
+
+        return set(collected[:size]), f"wordfreq top {size} unique normalized words"
     except Exception:
         words = {normalize_word_form(word) for word in STOP_WORDS}
         return words, "spaCy stop-word fallback"
@@ -395,8 +424,9 @@ def analyze_chapters(
         doc = nlp(text)
         counter: Counter[str] = Counter()
         definitions: dict[str, str] = {}
+        occurrences: dict[str, dict[str, object]] = {}
 
-        for token in doc:
+        for token_index, token in enumerate(doc):
             if token.is_space or token.is_punct or token.like_num:
                 continue
             if remove_stopwords and token.is_stop:
@@ -415,23 +445,47 @@ def analyze_chapters(
 
             pos = wordnet_pos(token.pos_)
             definition_list = lookup_definitions(normalized, pos)
+            context = ""
+            try:
+                context = token.sent.text.strip()
+            except Exception:
+                context = ""
 
             counter[normalized] += 1
             if definition_list:
                 definitions.setdefault(normalized, definition_list[0])
+            if normalized not in occurrences:
+                occurrences[normalized] = {
+                    "word": normalized,
+                    "freq": 0,
+                    "definition": definition_list[0] if definition_list else "",
+                    "context": context,
+                    "first_index": token_index,
+                }
+            occurrences[normalized]["freq"] = int(occurrences[normalized]["freq"]) + 1
+            if not occurrences[normalized].get("definition") and definition_list:
+                occurrences[normalized]["definition"] = definition_list[0]
+            if not occurrences[normalized].get("context") and context:
+                occurrences[normalized]["context"] = context
 
         global_counter.update(counter)
         chapter_total = sum(counter.values())
         total_words += chapter_total
         chapter_id = f"chapter_{index}"
+        ordered_occurrences = sorted(
+            occurrences.values(),
+            key=lambda item: (int(item.get("first_index", 0)), str(item.get("word", ""))),
+        )
         chapter_results.append(
             ChapterResult(
                 chapter_id=chapter_id,
                 title=chapter_title,
                 total_words=chapter_total,
                 unique_words=len(counter),
+                text=text,
                 frequencies=dict(counter.most_common()),
                 definitions=definitions,
+                oov_words=[dict(item) for item in ordered_occurrences],
             )
         )
 
@@ -466,24 +520,43 @@ def apply_known_words_to_analysis(result: AnalysisResult | dict, known_words: se
         for word, freq in chapter["frequencies"].items():
             if word not in known_words:
                 definition = chapter.get("definitions", {}).get(word, lookup_word_definition(word))
-                oov_words.append({"word": word, "freq": freq, "definition": definition})
+                chapter_oov = next(
+                    (item for item in chapter.get("oov_words", []) if item.get("word") == word),
+                    None,
+                )
+                oov_words.append(
+                    {
+                        "word": word,
+                        "freq": freq,
+                        "definition": definition,
+                        "context": (chapter_oov or {}).get("context", ""),
+                        "first_index": (chapter_oov or {}).get("first_index", 0),
+                    }
+                )
                 existing = global_oov_map.get(word)
                 if existing is None:
                     global_oov_map[word] = {
                         "word": word,
                         "freq": freq,
                         "definition": definition,
+                        "context": (chapter_oov or {}).get("context", ""),
                         "chapter_id": chapter["chapter_id"],
                         "chapter": chapter["title"],
+                        "first_index": (chapter_oov or {}).get("first_index", 0),
                     }
                 else:
                     existing["freq"] = max(int(existing["freq"]), freq)
                 total_oov_words += freq
         chapter_copy = dict(chapter)
-        chapter_copy["oov_words"] = sorted(oov_words, key=lambda item: (-int(item["freq"]), item["word"]))
+        chapter_copy["oov_words"] = sorted(
+            oov_words, key=lambda item: (int(item.get("first_index", 0)), str(item["word"]))
+        )
         chapters.append(chapter_copy)
 
-    global_oov = sorted(global_oov_map.values(), key=lambda item: (-int(item["freq"]), item["word"]))
+    global_oov = sorted(
+        global_oov_map.values(),
+        key=lambda item: (int(item.get("first_index", 0)), str(item["word"]))
+    )
     raw["chapters"] = chapters
     raw["global_oov_words"] = global_oov
     raw["total_oov_words"] = total_oov_words

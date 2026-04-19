@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import html
 import io
+import json
 import re
 import tempfile
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+
+try:
+    import ebooklib
+    from ebooklib import epub as ebooklib_epub
+except Exception:  # pragma: no cover - optional dependency
+    ebooklib = None
+    ebooklib_epub = None
 
 try:
     from cedict.cedict import DictionaryData, search as cedict_search
@@ -17,11 +27,12 @@ except Exception:  # pragma: no cover - optional dependency
     cedict_search = None
 
 from epub_analyzer import (
-    CEFR_TO_WORD_SIZE,
+    IELTS_TO_WORD_SIZE,
     analyze_epub_file,
     apply_known_words_to_analysis,
     load_known_words,
-    normalize_cefr_level,
+    load_spacy_model,
+    normalize_word_form,
     parse_known_words_text,
     MAX_KNOWN_WORD_SIZE,
 )
@@ -48,13 +59,11 @@ TEXT = {
         "subtitle": "Upload an EPUB, extract chapter text, and surface likely unknown words with definitions.",
         "language": "Language",
         "sidebar_title": "Settings",
-        "sidebar_caption": "Set your English level, vocabulary size, and cleanup filters here.",
-        "sidebar_tip": "Use the sidebar to set English level, vocabulary size, and cleanup filters.",
+        "sidebar_caption": "Set your vocabulary size and cleanup filters here.",
+        "sidebar_tip": "Use the controls below to set language, vocabulary size, and cleanup filters.",
         "epub_file": "EPUB file",
         "vocab_basis": "Vocabulary basis",
-        "vocab_mode_level": "English level",
         "vocab_mode_size": "Known vocabulary size",
-        "english_level": "English level",
         "known_vocab_size": "Known vocabulary size",
         "estimated_vocab_size": "Estimated vocabulary size",
         "cleanup_filters": "Cleanup filters",
@@ -87,9 +96,10 @@ TEXT = {
         "showing_full": "Showing the full book.",
         "range_help": "Set start and end to the same chapter for a single-chapter view, or extend end to include later chapters.",
         "filter_words": "Filter words",
-        "selectable_words": "Selectable words",
+        "selectable_words": "Copyable word list",
         "download_anki": "Download Anki TSV",
-        "download_csv": "Download unknown-word CSV",
+        "download_annotated_epub": "Download annotated EPUB",
+        "prepare_annotated_epub": "Prepare annotated EPUB",
         "unique_words": "Unique words",
         "chapters": "Chapters",
         "unique_unknown_words": "Unique unknown words",
@@ -99,19 +109,19 @@ TEXT = {
         "word": "Word",
         "definition": "Definition",
         "frequency": "Freq",
+        "context": "Context",
+        "book_order_note": "Words are listed in the order they appear in the book.",
     },
     "zh": {
         "title": "看书学单词",
         "subtitle": "上传 EPUB，提取章节文本，查看不认识的单词和释义。",
         "language": "语言",
         "sidebar_title": "设置",
-        "sidebar_caption": "在这里设置英语水平、词汇量和清理过滤器。",
-        "sidebar_tip": "请在侧边栏设置英语水平、词汇量和清理过滤器。",
+        "sidebar_caption": "在这里设置词汇量和清理过滤器。",
+        "sidebar_tip": "请在下面设置语言、词汇量和清理过滤器。",
         "epub_file": "EPUB 文件",
         "vocab_basis": "词汇基准",
-        "vocab_mode_level": "英语水平",
         "vocab_mode_size": "已知词汇量",
-        "english_level": "英语水平",
         "known_vocab_size": "已知词汇量",
         "estimated_vocab_size": "估计词汇量",
         "cleanup_filters": "清理过滤器",
@@ -144,9 +154,10 @@ TEXT = {
         "showing_full": "当前显示整本书。",
         "range_help": "把起始和结束设成同一章就是单章视图；把结束章往后调就是章节范围。",
         "filter_words": "筛选单词",
-        "selectable_words": "可复制单词",
+        "selectable_words": "可复制单词列表",
         "download_anki": "下载 Anki TSV",
-        "download_csv": "下载生词 CSV",
+        "download_annotated_epub": "下载带释义 EPUB",
+        "prepare_annotated_epub": "生成带释义 EPUB",
         "unique_words": "唯一词数",
         "chapters": "章节数",
         "unique_unknown_words": "生词数",
@@ -156,6 +167,8 @@ TEXT = {
         "word": "单词",
         "definition": "释义",
         "frequency": "频率",
+        "context": "语境",
+        "book_order_note": "单词按在书中出现的顺序显示。",
     },
 }
 
@@ -166,7 +179,7 @@ LANG_LABELS = {
 
 
 def t(key: str) -> str:
-    lang = st.session_state.get("ui_lang", "en")
+    lang = st.session_state.get("ui_lang", current_lang)
     return TEXT.get(lang, TEXT["en"]).get(key, TEXT["en"].get(key, key))
 
 
@@ -182,12 +195,32 @@ def detect_browser_language() -> str:
     return "zh" if "zh" in accept_language.lower() else "en"
 
 
-current_lang = st.session_state.get("ui_lang", "en")
+current_lang = st.session_state.get("ui_lang", detect_browser_language())
 
 
-def closest_cefr_level(size: int) -> str:
-    levels = list(CEFR_TO_WORD_SIZE.items())
-    return min(levels, key=lambda item: abs(item[1] - size))[0]
+def approximate_level_label(size: int) -> str:
+    if size < 1500:
+        cefr, ielts, label = "A1", "1.0 - 2.5", "Beginner"
+        zh_label = "入门"
+    elif size < 3000:
+        cefr, ielts, label = "A2", "3.0 - 3.5", "Elementary"
+        zh_label = "初级"
+    elif size < 5000:
+        cefr, ielts, label = "B1", "4.0 - 5.0", "Intermediate"
+        zh_label = "中级"
+    elif size < 8000:
+        cefr, ielts, label = "B2", "5.5 - 6.5", "Upper-Intermediate"
+        zh_label = "中上级"
+    elif size <= 12000:
+        cefr, ielts, label = "C1", "7.0 - 8.0", "Advanced"
+        zh_label = "高级"
+    else:
+        cefr, ielts, label = "C2", "8.5 - 9.0", "Proficiency"
+        zh_label = "精通"
+
+    if current_lang == "en":
+        return f"roughly {label} · {cefr} · IELTS {ielts}"
+    return f"约{zh_label} · {cefr} · IELTS {ielts}"
 
 
 def reading_fit_from_coverage(coverage: float) -> str:
@@ -264,39 +297,73 @@ def write_upload_to_tempfile(uploaded_file) -> Path:
         return Path(tmp.name)
 
 
+def store_uploaded_file(
+    uploaded_file, *, bytes_key: str, name_key: str, hash_key: str
+) -> bytes:
+    data = uploaded_file.getvalue()
+    st.session_state[bytes_key] = data
+    st.session_state[name_key] = uploaded_file.name
+    st.session_state[hash_key] = hashlib.sha256(data).hexdigest()
+    return data
+
+
 def fingerprint_upload(uploaded_file) -> str:
     return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
 
 
 def analysis_input_config(
-    uploaded_file, remove_stopwords, remove_proper_nouns, min_token_length
+    epub_hash: str | None,
+    remove_stopwords: bool,
+    remove_proper_nouns: bool,
+    min_token_length: int,
+    vocab_size: int,
+    custom_vocab_hash: str | None,
 ) -> dict:
     return {
-        "upload_hash": fingerprint_upload(uploaded_file) if uploaded_file else None,
+        "upload_hash": epub_hash,
         "remove_stopwords": remove_stopwords,
         "remove_proper_nouns": remove_proper_nouns,
         "min_token_length": min_token_length,
+        "vocab_size": vocab_size,
+        "custom_vocab_hash": custom_vocab_hash,
     }
 
 
-def build_oov_csv(result: dict) -> str:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["chapter", "word", "freq", "definition"])
-    for chapter in result["chapters"]:
-        for row in chapter["oov_words"]:
-            writer.writerow(
-                [
-                    chapter_short_name(chapter),
-                    row["word"],
-                    row.get("freq", ""),
-                    row.get("definition", ""),
-                ]
-            )
-    return buffer.getvalue()
+@st.cache_data(show_spinner=False)
+def analyze_epub_bytes_cached(
+    epub_bytes: bytes,
+    epub_name: str,
+    remove_stopwords: bool,
+    remove_proper_nouns: bool,
+    min_token_length: int,
+) -> dict:
+    suffix = Path(epub_name).suffix or ".epub"
+    if suffix.lower() == ".zip":
+        suffix = ".epub"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(epub_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        result = analyze_epub_file(
+            tmp_path,
+            known_words=set(),
+            remove_stopwords=remove_stopwords,
+            remove_proper_nouns=remove_proper_nouns,
+            min_token_length=min_token_length,
+            known_words_source="raw parse",
+        )
+        return result.to_dict()
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
-def build_anki_tsv(result: dict, *, use_chinese_definition: bool, hide_undefined_words: bool) -> str:
+@st.cache_data(show_spinner=False)
+def build_anki_tsv(
+    result: dict, *, use_chinese_definition: bool, hide_undefined_words: bool
+) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter="\t")
     writer.writerow(["word", "definition", "chapter", "freq"])
@@ -328,6 +395,133 @@ def export_text_payload(text: str) -> bytes:
     return text.encode("utf-8")
 
 
+def annotated_epub_download_name(source_name: str | None) -> str:
+    stem = Path(source_name or "").stem.strip() or "Book"
+    return f"{stem} (BookVocab version).epub"
+
+
+def chapter_definition_map(
+    chapter: dict, *, use_chinese_definition: bool
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for row in chapter.get("oov_words", []):
+        word = row.get("word", "").strip().lower()
+        if not word:
+            continue
+        definition = ""
+        if use_chinese_definition:
+            definition = translate_word_to_zh(word) or row.get("definition", "")
+        else:
+            definition = row.get("definition", "")
+        if definition.strip():
+            mapping[word] = definition.strip()
+    return mapping
+
+
+def annotate_text_for_epub(text: str, definitions: dict[str, str]) -> str:
+    if not text:
+        return "<p></p>"
+
+    nlp = load_spacy_model()
+    doc = nlp(text)
+    parts: list[str] = []
+    seen_words: set[str] = set()
+
+    for token in doc:
+        if token.is_space:
+            parts.append(html.escape(token.text_with_ws))
+            continue
+        if token.is_stop or token.pos_ == "PROPN":
+            parts.append(html.escape(token.text_with_ws))
+            continue
+
+        lemma = (
+            token.lemma_ if token.lemma_ and token.lemma_ != "-PRON-" else token.text
+        )
+        normalized = normalize_word_form(lemma)
+        gloss = definitions.get(normalized, "")
+        if gloss and normalized not in seen_words:
+            token_text = html.escape(token.text)
+            token_ws = html.escape(token.whitespace_)
+            gloss_html = html.escape(gloss)
+            parts.append(
+                f'<span style="text-decoration:underline;">{token_text}</span>'
+                f" [{gloss_html}]{token_ws}"
+            )
+            seen_words.add(normalized)
+        else:
+            parts.append(html.escape(token.text_with_ws))
+
+    body = "".join(parts).replace("\n", "<br/>")
+    return (
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        "<head>"
+        '<meta charset="utf-8"/>'
+        "<style>"
+        "body{font-family:serif;line-height:1.6;margin:1em;}"
+        "p{margin:0 0 1em 0;}"
+        "</style>"
+        "</head><body><p>"
+        f"{body}"
+        "</p></body></html>"
+    )
+
+
+def build_annotated_epub_bytes(
+    result: dict,
+    *,
+    source_epub_bytes: bytes,
+    source_epub_name: str,
+    use_chinese_definition: bool,
+    progress_bar=None,
+) -> bytes:
+    if ebooklib_epub is None:
+        raise RuntimeError("ebooklib is not installed.")
+
+    suffix = Path(source_epub_name).suffix or ".epub"
+    if suffix.lower() == ".zip":
+        suffix = ".epub"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(source_epub_bytes)
+        tmp_path = Path(tmp.name)
+
+    try:
+        book = ebooklib_epub.read_epub(str(tmp_path))
+        book.set_title(f"{book.title or 'Book'} (BookVocab version)")
+        chapter_results = result.get("chapters", [])
+        document_items = [
+            item for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
+        ]
+        for chapter_index, (chapter, item) in enumerate(
+            zip(chapter_results, document_items), start=1
+        ):
+            defs = chapter_definition_map(
+                chapter, use_chinese_definition=use_chinese_definition
+            )
+            item.content = annotate_text_for_epub(chapter.get("text", ""), defs)
+            if progress_bar is not None:
+                total = max(len(chapter_results), 1)
+                progress_bar.progress(min(chapter_index / total, 1.0))
+        book.add_item(ebooklib_epub.EpubNcx())
+        book.add_item(ebooklib_epub.EpubNav())
+        out = tempfile.NamedTemporaryFile(delete=False, suffix=".epub")
+        out_path = Path(out.name)
+        out.close()
+        try:
+            ebooklib_epub.write_epub(str(out_path), book)
+            return out_path.read_bytes()
+        finally:
+            try:
+                out_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def flatten_oov_rows(chapters: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for chapter_order, chapter in enumerate(chapters, start=1):
@@ -339,6 +533,7 @@ def flatten_oov_rows(chapters: list[dict]) -> list[dict]:
                     "word": row["word"],
                     "freq": row.get("freq", 0),
                     "definition": row.get("definition", ""),
+                    "context": row.get("context", ""),
                     "_chapter_order": chapter_order,
                 }
             )
@@ -440,113 +635,130 @@ def chapter_has_visible_oov(chapter: dict, hide_undefined_words: bool) -> bool:
     return bool(chapter.get("oov_words", []))
 
 
+def selection_row_index(table_event) -> int | None:
+    if table_event is None:
+        return None
+    selection = getattr(table_event, "selection", None)
+    if selection is None and isinstance(table_event, dict):
+        selection = table_event.get("selection")
+    if selection is None:
+        return None
+    rows = getattr(selection, "rows", None)
+    if rows is None and isinstance(selection, dict):
+        rows = selection.get("rows")
+    if not rows:
+        return None
+    try:
+        return int(rows[0])
+    except Exception:
+        return None
+
+
 st.header(t("title"))
 st.caption(t("subtitle"))
 st.info(t("sidebar_tip"))
 
-uploaded_epub = st.file_uploader(t("epub_file"), type=["epub", "zip"])
-cefr_level = None
+st.radio(
+    t("language"),
+    ["en", "zh"],
+    index=0 if current_lang == "en" else 1,
+    format_func=lambda value: LANG_LABELS.get(value, value),
+    key="ui_lang",
+    horizontal=True,
+)
 
-if "cefr_level_pref" not in st.session_state:
-    st.session_state["cefr_level_pref"] = "C1"
-if "estimated_vocab_pref" not in st.session_state:
-    st.session_state["estimated_vocab_pref"] = CEFR_TO_WORD_SIZE["C1"]
+uploaded_epub = st.file_uploader(
+    t("epub_file"), type=["epub", "zip"], key="epub_upload"
+)
+uploaded_epub_bytes = None
+uploaded_epub_name = None
+uploaded_epub_hash = None
+if uploaded_epub is not None:
+    uploaded_epub_bytes = store_uploaded_file(
+        uploaded_epub,
+        bytes_key="uploaded_epub_bytes",
+        name_key="uploaded_epub_name",
+        hash_key="uploaded_epub_hash",
+    )
+    uploaded_epub_name = uploaded_epub.name
+    uploaded_epub_hash = st.session_state.get("uploaded_epub_hash")
+else:
+    uploaded_epub_bytes = st.session_state.get("uploaded_epub_bytes")
+    uploaded_epub_name = st.session_state.get("uploaded_epub_name")
+    uploaded_epub_hash = st.session_state.get("uploaded_epub_hash")
 
 with st.sidebar:
     st.header(t("sidebar_title"))
     st.caption(t("sidebar_caption"))
-    cefr_level_options = list(CEFR_TO_WORD_SIZE.keys())
-    cefr_level = st.selectbox(
-        t("english_level"),
-        cefr_level_options,
-        index=cefr_level_options.index(st.session_state["cefr_level_pref"]),
-    )
-    st.session_state["cefr_level_pref"] = cefr_level
-    expected_vocab_size = CEFR_TO_WORD_SIZE.get(cefr_level, CEFR_TO_WORD_SIZE["C1"])
     vocab_size = st.slider(
         t("estimated_vocab_size"),
         1000,
         MAX_KNOWN_WORD_SIZE,
-        value=st.session_state["estimated_vocab_pref"],
+        value=12000,
         step=1000,
     )
-    if vocab_size != st.session_state["estimated_vocab_pref"]:
-        st.session_state["estimated_vocab_pref"] = vocab_size
-        cefr_level = closest_cefr_level(vocab_size)
-        st.session_state["cefr_level_pref"] = cefr_level
-        st.rerun()
-    elif expected_vocab_size != st.session_state["estimated_vocab_pref"]:
-        st.session_state["estimated_vocab_pref"] = expected_vocab_size
-        st.session_state["cefr_level_pref"] = cefr_level
-        st.rerun()
     st.caption(
-        f"{t('english_level')}: {cefr_level} · {t('estimated_vocab_size')}: {vocab_size:,}"
+        f"{t('estimated_vocab_size')}: {vocab_size:,} ({approximate_level_label(vocab_size)})"
     )
     st.markdown(f"**{t('cleanup_filters')}**")
     remove_stopwords = st.checkbox(t("remove_stopwords"), value=True)
     remove_proper_nouns = st.checkbox(t("remove_proper_nouns"), value=True)
     hide_undefined_words = st.checkbox(t("hide_no_defs"), value=True)
+    show_chinese_definitions = st.checkbox(
+        t("show_zh_definition"),
+        value=True,
+        key="show_zh_definition",
+    )
     hide_front_matter = st.checkbox(t("hide_front_matter"), value=False)
-    min_token_length = st.slider(t("min_token_length"), 2, 4, 3)
+    show_frequencies = st.checkbox(t("show_freq"), value=False)
+    min_token_length = 3
     custom_vocab = st.file_uploader(
         t("optional_vocab"), type=["txt", "csv"], key="vocab"
     )
-    show_frequencies = st.checkbox(t("show_freq"), value=False)
-    show_chinese_definitions = st.checkbox(
-        t("show_zh_definition"),
-        value=current_lang == "zh",
-        key="show_zh_definition",
-    )
-    st.divider()
-    language = st.radio(
-        "Language / 语言",
-        ["en", "zh"],
-        index=0 if current_lang == "en" else 1,
-        format_func=lambda value: LANG_LABELS.get(value, value),
-        key="ui_lang",
-        horizontal=True,
+    custom_vocab_text = None
+    if custom_vocab is not None:
+        custom_vocab_text = custom_vocab.getvalue().decode("utf-8", errors="ignore")
+        st.session_state["custom_vocab_text"] = custom_vocab_text
+        st.session_state["custom_vocab_name"] = custom_vocab.name
+    else:
+        custom_vocab_text = st.session_state.get("custom_vocab_text")
+    custom_vocab_hash = (
+        hashlib.sha256(custom_vocab_text.encode("utf-8")).hexdigest()
+        if custom_vocab_text
+        else None
     )
 analysis_result: dict | None = None
 analysis_meta: dict | None = None
 
 current_input_config = analysis_input_config(
-    uploaded_epub,
+    uploaded_epub_hash,
     remove_stopwords,
     remove_proper_nouns,
     min_token_length,
+    vocab_size,
+    custom_vocab_hash,
 )
 
 stored = st.session_state.get("analysis_result")
 stored_input_config = st.session_state.get("analysis_input_config")
 
-if uploaded_epub:
+active_epub_bytes = uploaded_epub_bytes
+active_epub_name = uploaded_epub_name
+
+if active_epub_bytes and active_epub_name:
     if st.button(t("analyze"), type="primary"):
-        epub_path = write_upload_to_tempfile(uploaded_epub)
-
-        custom_words = None
-        known_words_source = ""
-        if custom_vocab is not None:
-            vocab_text = custom_vocab.getvalue().decode("utf-8", errors="ignore")
-            custom_words = parse_known_words_text(vocab_text)
-            known_words, known_words_source = load_known_words(
-                custom_words=custom_words
-            )
-        else:
-            known_words, known_words_source = load_known_words(size=vocab_size)
-
         try:
             with st.spinner(
                 "Analyzing chapters..."
                 if st.session_state.get("ui_lang", "en") == "en"
                 else "正在分析章节..."
             ):
-                analysis_result_obj = analyze_epub_file(
-                    epub_path,
-                    known_words=known_words,
-                    remove_stopwords=remove_stopwords,
-                    remove_proper_nouns=remove_proper_nouns,
-                    min_token_length=min_token_length,
-                    known_words_source=known_words_source,
+                analysis_result = analyze_epub_bytes_cached(
+                    active_epub_bytes,
+                    active_epub_name,
+                    remove_stopwords,
+                    remove_proper_nouns,
+                    min_token_length,
                 )
         except Exception as exc:
             st.error(
@@ -555,25 +767,51 @@ if uploaded_epub:
                 else f"分析失败：{exc}"
             )
         else:
-            analysis_meta = {
-                "cefr_level": cefr_level,
-                "vocab_size": vocab_size,
-                "known_words_source": known_words_source,
-            }
-            analysis_result = analysis_result_obj.to_dict()
             st.session_state["analysis_input_config"] = current_input_config
             st.session_state["analysis_result"] = analysis_result
-            st.session_state["analysis_meta"] = analysis_meta
-
-if stored and stored_input_config == current_input_config:
-    analysis_meta = st.session_state.get("analysis_meta")
-    analysis_result = stored
-elif uploaded_epub and stored and stored_input_config != current_input_config:
-    st.info(
-        "Current file or text settings differ from the last analysis. Click Analyze EPUB to refresh the raw parse."
-        if st.session_state.get("ui_lang", "en") == "en"
-        else "当前文件或文本设置与上次分析不同。请点击“分析 EPUB”重新解析。"
-    )
+            st.session_state["analysis_meta"] = {
+                "vocab_size": vocab_size,
+                "known_words_source": "",
+            }
+            st.session_state["uploaded_epub_bytes"] = active_epub_bytes
+            st.session_state["uploaded_epub_name"] = active_epub_name
+            st.session_state["uploaded_epub_hash"] = uploaded_epub_hash
+            st.session_state["custom_vocab_text"] = custom_vocab_text
+            analysis_meta = st.session_state["analysis_meta"]
+if active_epub_bytes and active_epub_name:
+    if stored and stored_input_config == current_input_config:
+        analysis_meta = st.session_state.get("analysis_meta")
+        analysis_result = stored
+    elif stored and stored_input_config != current_input_config:
+        st.info(
+            "Current file or text settings differ from the last analysis. Re-running on the loaded EPUB."
+            if st.session_state.get("ui_lang", "en") == "en"
+            else "当前文件或文本设置与上次分析不同。正在基于已加载的 EPUB 重新分析。"
+        )
+        try:
+            with st.spinner(
+                "Analyzing chapters..."
+                if st.session_state.get("ui_lang", "en") == "en"
+                else "正在分析章节..."
+            ):
+                analysis_result = analyze_epub_bytes_cached(
+                    active_epub_bytes,
+                    active_epub_name,
+                    remove_stopwords,
+                    remove_proper_nouns,
+                    min_token_length,
+                )
+        except Exception as exc:
+            st.error(
+                f"Analysis failed: {exc}"
+                if st.session_state.get("ui_lang", "en") == "en"
+                else f"分析失败：{exc}"
+            )
+        else:
+            analysis_meta = st.session_state.get("analysis_meta")
+            analysis_result["known_words_source"] = ""
+            st.session_state["analysis_input_config"] = current_input_config
+            st.session_state["analysis_result"] = analysis_result
 
 if analysis_result:
     if not analysis_result["chapters"]:
@@ -584,20 +822,17 @@ if analysis_result:
         )
         st.stop()
 
-    if custom_vocab is not None:
-        vocab_text = custom_vocab.getvalue().decode("utf-8", errors="ignore")
-        custom_words = parse_known_words_text(vocab_text)
+    if custom_vocab_text:
+        custom_words = parse_known_words_text(custom_vocab_text)
         known_words, known_words_source = load_known_words(custom_words=custom_words)
     else:
         known_words, known_words_source = load_known_words(
             size=vocab_size,
-            cefr_level=cefr_level,
         )
 
     analysis_result = apply_known_words_to_analysis(analysis_result, known_words)
     analysis_result["known_words_source"] = known_words_source
     analysis_meta = {
-        "cefr_level": cefr_level,
         "vocab_size": vocab_size,
         "known_words_source": known_words_source,
     }
@@ -609,13 +844,13 @@ if analysis_result:
     ]
     if not visible_chapters:
         visible_chapters = analysis_result["chapters"]
-    visible_rows = flatten_oov_rows(visible_chapters)
+    visible_rows_global = flatten_oov_rows(visible_chapters)
+    visible_unique_oov_words_global = len({row["word"] for row in visible_rows_global})
     visible_total_oov_occurrences = sum(
         sum(row.get("freq", 0) for row in chapter.get("oov_words", []))
         for chapter in visible_chapters
     )
     visible_total_tokens = sum(chapter["total_words"] for chapter in visible_chapters)
-    visible_unique_oov_words_global = len({row["word"] for row in visible_rows})
     known_coverage = (
         0.0
         if visible_total_tokens == 0
@@ -633,16 +868,9 @@ if analysis_result:
     top5.metric(fit_label, f"{known_coverage:.1%}")
     st.caption(
         (
-            f"Estimated coverage only · frequency-list based"
+            f"Estimated coverage only · frequency-list based · Total tokens: {visible_total_tokens:,} · Unknown occurrences: {visible_total_oov_occurrences:,}"
             if st.session_state.get("ui_lang", "en") == "en"
-            else f"仅供估计 · 基于词频表"
-        )
-    )
-    st.caption(
-        (
-            f"Total token count: {visible_total_tokens:,} · Unknown-word occurrences: {visible_total_oov_occurrences:,}"
-            if st.session_state.get("ui_lang", "en") == "en"
-            else f"总词数：{visible_total_tokens:,} · 生词出现次数：{visible_total_oov_occurrences:,}"
+            else f"仅供估计 · 基于词频表 · 总词数：{visible_total_tokens:,} · 生词出现次数：{visible_total_oov_occurrences:,}"
         )
     )
     st.markdown(
@@ -670,6 +898,7 @@ if analysis_result:
         key="chapter_mode",
         format_func=choice_label,
     )
+    st.session_state["last_chapter_mode"] = chapter_mode
     chapter_indices = list(range(len(chapters)))
     st.markdown(f"**{t('chapter_filter')}**")
     if "chapter_filter_initialized" not in st.session_state:
@@ -680,7 +909,6 @@ if analysis_result:
 
     if chapter_mode == "chapter_mode_all":
         selected_chapters = chapters
-        st.caption(t("showing_full"))
     elif chapter_mode == "chapter_mode_single":
         single_chapter_indices = [
             idx
@@ -736,43 +964,34 @@ if analysis_result:
     if hide_undefined_words:
         rows = [row for row in rows if row.get("definition", "").strip()]
     if search_term:
-        rows = [
-            row
-            for row in rows
-            if search_term in row["word"].lower()
-            or search_term in row.get("definition", "").lower()
-            or search_term in row["chapter"].lower()
-        ]
-    rows = sorted(rows, key=lambda row: (row["_chapter_order"], row["word"]))
+        rows = [row for row in rows if search_term in row["word"].lower()]
     if show_chinese_definitions and rows:
         unique_words = {row["word"] for row in rows if row.get("word", "").strip()}
-        zh_map = {word: translate_word_to_zh(word) for word in unique_words}
-        translated_count = sum(1 for value in zh_map.values() if value.strip())
-        if translated_count == 0:
-            st.warning(
-                "Chinese dictionary lookup is not available in this run, so definitions are still shown in English."
-                if st.session_state.get("ui_lang", "en") == "en"
-                else "当前运行无法提供中文词典查询，所以释义仍显示英文。"
-            )
-        else:
-            st.caption(
-                f"Chinese definitions found for {translated_count:,} unique words."
-                if st.session_state.get("ui_lang", "en") == "en"
-                else f"已转换 {translated_count:,} 个唯一单词的中文释义。"
-            )
+        with st.spinner(
+            "Loading Chinese definitions..."
+            if st.session_state.get("ui_lang", "en") == "en"
+            else "正在加载中文释义..."
+        ):
+            zh_map = {word: translate_word_to_zh(word) for word in unique_words}
         for row in rows:
             row["definition_zh"] = zh_map.get(row["word"], "")
     else:
         for row in rows:
             row.pop("definition_zh", None)
     visible_unique_oov_words = len({row["word"] for row in rows})
-    defined_unique_oov_words = len(
-        {
-            row["word"]
-            for row in flatten_oov_rows(selected_chapters)
-            if row.get("definition", "").strip()
-        }
-    )
+    export_signature = hashlib.sha256(
+        json.dumps(
+            {
+                "config": current_input_config,
+                "show_chinese_definitions": show_chinese_definitions,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    if st.session_state.get("annotated_epub_signature") != export_signature:
+        st.session_state.pop("annotated_epub_bytes", None)
+        st.session_state["annotated_epub_signature"] = export_signature
 
     table = pd.DataFrame(rows)
     if not table.empty:
@@ -780,7 +999,13 @@ if analysis_result:
         if show_chinese_definitions:
             ordered = [
                 col
-                for col in ["word", "definition_zh", "definition", "chapter", "freq"]
+                for col in [
+                    "word",
+                    "definition_zh",
+                    "definition",
+                    "chapter",
+                    "freq",
+                ]
                 if col in table.columns
             ]
         else:
@@ -792,10 +1017,13 @@ if analysis_result:
         table = table[ordered + [col for col in table.columns if col not in ordered]]
     if not show_frequencies and "freq" in table.columns:
         table = table.drop(columns=["freq"])
-    st.dataframe(
+    table_event = st.dataframe(
         table,
         use_container_width=True,
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="oov_table",
         column_config={
             "word": st.column_config.TextColumn(t("word"), width="medium"),
             "definition_zh": st.column_config.TextColumn(
@@ -807,22 +1035,30 @@ if analysis_result:
         },
     )
     if rows:
-        st.text_area(
-            t("selectable_words"),
-            "\n".join(row["word"] for row in rows),
-            height=140,
-            label_visibility="visible",
-        )
-    st.caption(
-        f"{t('visible_filters')}: {visible_unique_oov_words:,} unique unknown words."
-        if st.session_state.get("ui_lang", "en") == "en"
-        else f"{t('visible_filters')}：{visible_unique_oov_words:,} 个生词。"
-    )
-    st.caption(
-        f"{t('dict_defs')} {defined_unique_oov_words:,} unique unknown words."
-        if st.session_state.get("ui_lang", "en") == "en"
-        else f"{t('dict_defs')}{defined_unique_oov_words:,} 个生词。"
-    )
+        st.caption(t("book_order_note"))
+        selected_index = selection_row_index(table_event)
+        if selected_index is None or selected_index >= len(rows):
+            selected_index = 0
+        selected_row = rows[selected_index] if rows else None
+        if selected_row:
+            st.caption(
+                "Below is the estimated unknown-word context from the book."
+                if st.session_state.get("ui_lang", "en") == "en"
+                else "下方显示的是书中对应的预估生词上下文。"
+            )
+            with st.expander(t("context"), expanded=True):
+                st.write(f"**{t('word')}:** {selected_row['word']}")
+                st.write(f"**{t('chapter')}:** {selected_row['chapter']}")
+                if selected_row.get("definition_zh") and show_chinese_definitions:
+                    st.write(
+                        f"**{t('chinese_definition')}:** {selected_row['definition_zh']}"
+                    )
+                st.write(
+                    f"**{t('definition')}:** {selected_row.get('definition', '') or '-'}"
+                )
+                st.write(
+                    f"**{t('context')}:** {selected_row.get('context', '') or '-'}"
+                )
 
     st.download_button(
         t("download_anki"),
@@ -833,14 +1069,57 @@ if analysis_result:
                 hide_undefined_words=hide_undefined_words,
             )
         ),
-        file_name="epub_anki_export.tsv",
+        file_name="BookVocab_anki_export.tsv",
         mime="text/tab-separated-values",
         key="download_anki",
     )
-    st.download_button(
-        t("download_csv"),
-        data=export_text_payload(build_oov_csv(analysis_result)),
-        file_name="epub_unknown_words.csv",
-        mime="text/csv",
-        key="download_csv",
-    )
+
+    annotated_epub_bytes = st.session_state.get("annotated_epub_bytes")
+    if annotated_epub_bytes:
+        st.download_button(
+            t("download_annotated_epub"),
+            data=annotated_epub_bytes,
+            file_name=annotated_epub_download_name(active_epub_name),
+            mime="application/epub+zip",
+            key="download_annotated_epub",
+            type="primary",
+        )
+    else:
+        if st.button(
+            t("prepare_annotated_epub"),
+            key="prepare_annotated_epub",
+            type="primary",
+        ):
+            if not active_epub_bytes or not active_epub_name:
+                st.warning(
+                    "Please upload an EPUB first."
+                    if st.session_state.get("ui_lang", "en") == "en"
+                    else "请先上传 EPUB。"
+                )
+            else:
+                progress = st.progress(0)
+                try:
+                    with st.spinner(
+                        "Preparing annotated EPUB, please do not click elsewhere."
+                        if st.session_state.get("ui_lang", "en") == "en"
+                        else "正在生成带释义的EPUB，请勿点击其他地方。生成完请后点击下载。"
+                    ):
+                        st.session_state["annotated_epub_bytes"] = (
+                            build_annotated_epub_bytes(
+                                analysis_result,
+                                source_epub_bytes=active_epub_bytes,
+                                source_epub_name=active_epub_name,
+                                use_chinese_definition=show_chinese_definitions,
+                                progress_bar=progress,
+                            )
+                        )
+                except Exception as exc:
+                    st.caption(
+                        f"Annotated EPUB export is unavailable: {exc}"
+                        if st.session_state.get("ui_lang", "en") == "en"
+                        else f"带释义 EPUB 导出暂不可用：{exc}"
+                    )
+                finally:
+                    progress.empty()
+                if st.session_state.get("annotated_epub_bytes"):
+                    st.rerun()
