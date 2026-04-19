@@ -117,6 +117,7 @@ TEXT = {
         "frequency": "Freq",
         "context": "Context",
         "book_order_note": "Words are listed in the order they appear in the book.",
+        "row_hint": "Click the left side of a row to see the sentence context below.",
     },
     "zh": {
         "title": "看书学单词",
@@ -175,6 +176,7 @@ TEXT = {
         "frequency": "频率",
         "context": "语境",
         "book_order_note": "单词按在书中出现的顺序显示。",
+        "row_hint": "点击每行最左侧即可在下方查看上下文。",
     },
 }
 
@@ -703,6 +705,7 @@ st.radio(
     key="ui_lang",
     horizontal=True,
 )
+ui_lang = st.session_state.get("ui_lang", current_lang)
 
 uploaded_epub = st.file_uploader(
     t("epub_file"), type=["epub", "zip"], key="epub_upload"
@@ -741,9 +744,13 @@ with st.sidebar:
     remove_stopwords = st.checkbox(t("remove_stopwords"), value=True)
     remove_proper_nouns = st.checkbox(t("remove_proper_nouns"), value=True)
     hide_undefined_words = st.checkbox(t("hide_no_defs"), value=True)
+    previous_lang = st.session_state.get("_last_ui_lang")
     if "show_zh_definition" not in st.session_state:
-        st.session_state["show_zh_definition"] = current_lang == "zh"
+        st.session_state["show_zh_definition"] = ui_lang == "zh"
+    elif ui_lang == "zh" and previous_lang != "zh":
+        st.session_state["show_zh_definition"] = True
     show_chinese_definitions = st.checkbox(t("show_zh_definition"), key="show_zh_definition")
+    st.session_state["_last_ui_lang"] = ui_lang
     hide_front_matter = st.checkbox(t("hide_front_matter"), value=False)
     show_frequencies = st.checkbox(t("show_freq"), value=False)
     min_token_length = 3
@@ -776,6 +783,13 @@ current_input_config = analysis_input_config(
 
 stored = st.session_state.get("analysis_result")
 stored_input_config = st.session_state.get("analysis_input_config")
+
+if not uploaded_epub_bytes:
+    st.caption(
+        "If upload fails once, try again. That is usually a temporary browser or network issue."
+        if ui_lang == "en"
+        else "如果上传第一次失败，请再试一次。通常是浏览器或网络的临时问题。"
+    )
 
 active_epub_bytes = uploaded_epub_bytes
 active_epub_name = uploaded_epub_name
@@ -839,16 +853,6 @@ if active_epub_bytes and active_epub_name:
             analysis_result["known_words_source"] = ""
             st.session_state["analysis_input_config"] = current_input_config
             st.session_state["analysis_result"] = analysis_result
-
-analysis_ready = bool(analysis_result) or bool(
-    stored and stored_input_config == current_input_config
-)
-if uploaded_epub_bytes and not analysis_ready:
-    st.caption(
-        "If upload fails once, try again. That is usually a temporary browser or network issue."
-        if st.session_state.get("ui_lang", "en") == "en"
-        else "如果上传第一次失败，请再试一次。通常是浏览器或网络的临时问题。"
-    )
 
 if analysis_result:
     if not analysis_result["chapters"]:
@@ -1016,6 +1020,10 @@ if analysis_result:
         for row in rows:
             row.pop("definition_zh", None)
     visible_unique_oov_words = len({row["word"] for row in rows})
+    table_rows = [
+        {key: value for key, value in row.items() if key != "context"}
+        for row in rows
+    ]
     export_signature = hashlib.sha256(
         json.dumps(
             {
@@ -1030,7 +1038,7 @@ if analysis_result:
         st.session_state.pop("annotated_epub_bytes", None)
         st.session_state["annotated_epub_signature"] = export_signature
 
-    table = pd.DataFrame(rows)
+    table = pd.DataFrame(table_rows)
     if not table.empty:
         table = table.drop(columns=["_chapter_order"], errors="ignore")
         if show_chinese_definitions:
@@ -1072,7 +1080,7 @@ if analysis_result:
         },
     )
     if rows:
-        st.caption(t("book_order_note"))
+        st.caption(f"{t('book_order_note')} {t('row_hint')}")
         selected_index = selection_row_index(table_event)
         if selected_index is None or selected_index >= len(rows):
             selected_index = 0
@@ -1112,7 +1120,21 @@ if analysis_result:
     )
 
     annotated_epub_bytes = st.session_state.get("annotated_epub_bytes")
-    if st.button(t("download_annotated_epub"), key="annotated_epub_action", type="primary"):
+    if annotated_epub_bytes:
+        st.download_button(
+            t("download_annotated_epub"),
+            data=annotated_epub_bytes,
+            file_name=annotated_epub_download_name(active_epub_name),
+            mime="application/epub+zip",
+            key="download_annotated_epub_ready",
+            type="primary",
+        )
+        st.caption(
+            "The file is ready to download. Please click the button above."
+            if st.session_state.get("ui_lang", "en") == "en"
+            else "文件已准备好下载。请点击上面的按钮。"
+        )
+    elif st.button(t("prepare_annotated_epub"), key="annotated_epub_action", type="primary"):
         if not active_epub_bytes or not active_epub_name:
             st.warning(
                 "Please upload an EPUB first."
@@ -1127,7 +1149,7 @@ if analysis_result:
                         "Preparing annotated EPUB, please do not click elsewhere."
                         if st.session_state.get("ui_lang", "en") == "en"
                         else "正在生成带释义的EPUB，请勿点击其他地方。生成完请后点击下载。"
-                    ):
+                        ):
                         annotated_epub_bytes = build_annotated_epub_bytes(
                             analysis_result,
                             source_epub_bytes=active_epub_bytes,
@@ -1138,10 +1160,11 @@ if analysis_result:
                         st.session_state["annotated_epub_bytes"] = annotated_epub_bytes
                     progress.empty()
                 if annotated_epub_bytes:
-                    trigger_browser_download(
-                        annotated_epub_bytes,
-                        annotated_epub_download_name(active_epub_name),
-                        "application/epub+zip",
+                    st.success(
+                        "Annotated EPUB is ready. Tap the download button above."
+                        if st.session_state.get("ui_lang", "en") == "en"
+                        else "带释义 EPUB 已准备好。请点击上面的下载按钮。"
                     )
+                    st.rerun()
             except Exception as exc:
                 st.error(friendly_failure_message("Annotated EPUB export", exc))
