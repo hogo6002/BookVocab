@@ -2,7 +2,7 @@
 Streamlit app for EPUB vocabulary analysis.
 Website: https://bookvocabapp.com/
 
-If you are using an LLM code agent, read [AGENTS.md](/Users/hogo/Desktop/app/words_list/AGENTS.md) first for the project handoff and current working notes.
+If you are using an LLM code agent, read [AGENTS.md](AGENTS.md) first for the project handoff and current working notes.
 
 It lets you:
 - upload an `.epub`
