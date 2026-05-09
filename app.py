@@ -42,7 +42,7 @@ from epub_analyzer import (
 
 logger = logging.getLogger("bookvocab")
 
-ANNOTATION_EXPORT_VERSION = 2
+ANNOTATION_EXPORT_VERSION = 4
 
 
 st.set_page_config(
@@ -769,7 +769,6 @@ def build_annotated_epub_bytes(
 
     try:
         book = ebooklib_epub.read_epub(str(tmp_path))
-        book.set_title(f"{book.title or 'Book'} (BookVocab version)")
         chapter_results = result.get("chapters", [])
         document_items = [
             item for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
@@ -805,8 +804,29 @@ def build_annotated_epub_bytes(
             if progress_bar is not None:
                 total = max(min(len(chapter_results), len(document_items)), 1)
                 progress_bar.progress(min(chapter_index / total, 1.0))
-        book.add_item(ebooklib_epub.EpubNcx())
-        book.add_item(ebooklib_epub.EpubNav())
+        existing_ids = {
+            str(
+                (
+                    item.get_id()
+                    if callable(getattr(item, "get_id", None))
+                    else getattr(item, "id", "")
+                )
+                or ""
+            ).lower()
+            for item in book.get_items()
+        }
+        has_ncx = "ncx" in existing_ids or any(
+            str(getattr(item, "file_name", "") or "").lower().endswith(".ncx")
+            for item in book.get_items()
+        )
+        has_nav = "nav" in existing_ids or any(
+            "nav" in (getattr(item, "properties", []) or [])
+            for item in book.get_items()
+        )
+        if not has_ncx:
+            book.add_item(ebooklib_epub.EpubNcx())
+        if not has_nav:
+            book.add_item(ebooklib_epub.EpubNav())
         out = tempfile.NamedTemporaryFile(delete=False, suffix=".epub")
         out_path = Path(out.name)
         out.close()
