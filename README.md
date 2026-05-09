@@ -10,7 +10,11 @@ It lets you:
 - surface likely unknown words
 - hide noisy tokens and front matter
 - browse results by chapter range
-- export Anki TSV or CSV
+- optionally show Chinese dictionary definitions
+- export Anki TSV
+- generate and download an annotated EPUB
+  - inline definitions (toggle)
+  - end-of-chapter note references + notes (toggle)
 
 ## Deploy
 
@@ -35,8 +39,15 @@ python3 -m venv .venv
 ./run.sh
 ```
 
+Quick validation:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/.pycache .venv/bin/python -m py_compile app.py epub_analyzer.py
+```
+
 ## Notes
 
 - EPUB page numbers are not reliable across readers, so this app focuses on chapter-based analysis.
 - The app uses lemma-based normalization and WordNet definitions to help English learners review vocabulary.
 - Uploaded EPUB files are processed locally by the app.
+- EPUB / Kindle conversion compatibility can vary by source book quality and metadata strictness.
