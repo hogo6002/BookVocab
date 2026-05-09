@@ -1012,7 +1012,14 @@ with st.sidebar:
     remove_stopwords = st.checkbox(t("remove_stopwords"), value=True)
     remove_proper_nouns = st.checkbox(t("remove_proper_nouns"), value=True)
     hide_undefined_words = st.checkbox(t("hide_no_defs"), value=True)
+    if "show_inline_annotation" not in st.session_state:
+        st.session_state["show_inline_annotation"] = True
+    if "show_endnote_annotation" not in st.session_state:
+        st.session_state["show_endnote_annotation"] = True
     previous_lang = st.session_state.get("_last_ui_lang")
+    if previous_lang is not None and previous_lang != ui_lang:
+        st.session_state["show_inline_annotation"] = True
+        st.session_state["show_endnote_annotation"] = True
     if "show_zh_definition" not in st.session_state:
         st.session_state["show_zh_definition"] = ui_lang == "zh"
     elif ui_lang == "zh" and previous_lang != "zh":
@@ -1021,10 +1028,6 @@ with st.sidebar:
     st.session_state["_last_ui_lang"] = ui_lang
     hide_front_matter = st.checkbox(t("hide_front_matter"), value=False)
     show_frequencies = st.checkbox(t("show_freq"), value=False)
-    if "show_inline_annotation" not in st.session_state:
-        st.session_state["show_inline_annotation"] = True
-    if "show_endnote_annotation" not in st.session_state:
-        st.session_state["show_endnote_annotation"] = True
     st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
     st.markdown(f"**{t('annotation_settings')}**")
     show_inline_annotation = st.checkbox(
