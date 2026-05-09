@@ -18,13 +18,17 @@ BookVocab is a Streamlit app for English learners to upload an EPUB, extract cha
   - front matter / non-chapters
   - minimum token length
 - Show results in a book-order table.
-- Show context for the selected row in a detail card below the table.
+- Show context (`上下文` in Chinese UI) for the selected row in a detail card below the table.
 - Export:
   - Anki TSV
   - annotated EPUB
 - Optional Chinese dictionary definitions are supported.
 - Chinese UI exists; English UI also exists.
 - The app shows a reading-fit estimate from coverage, but it is explicitly approximate because the known-word source is frequency-based.
+- Annotated EPUB supports two configurable annotation styles:
+  - inline definitions (checkbox)
+  - end-of-chapter note references + note list (checkbox)
+  - both are enabled by default
 
 ## Important user preferences
 
@@ -40,18 +44,20 @@ BookVocab is a Streamlit app for English learners to upload an EPUB, extract cha
 
 ## Current UI / behavior decisions
 
+- Language toggle is shown near the top of the page (outside the sidebar).
 - The sidebar contains:
-  - language
   - known vocabulary size
   - cleanup filters
   - Chinese definition toggle
   - front-matter toggle
   - frequency toggle
+  - annotation settings (two checkboxes: inline definitions, end-of-chapter notes)
   - optional known-word list
-- The app shows a prominent `Settings` button near the header to make the sidebar discoverable on mobile.
 - The previous floating overlay hack was removed because it was fragile.
 - The project currently keeps the chapter view only; no page-range feature.
 - The annotated EPUB export uses the current filtered unknown-word list, not every word in the book.
+- Annotation settings are placed below cleanup filters and above optional known-word upload.
+- When no valid upload is loaded yet, the UI shows a retry hint for transient upload failures (including occasional `400`).
 
 ## Repo structure
 
@@ -80,6 +86,13 @@ Current deployment target is Azure:
 - `translate_word_to_zh()` is cached.
 - Annotated EPUB export is generated in-memory and stored in session state.
 - The EPUB export uses the source EPUB structure and appends `BookVocab version` to the title/export name.
+- Annotated EPUB now edits source HTML in-place (DOM-based annotation), instead of rewriting whole chapter pages as plain text.
+- Export annotation behavior:
+  - inline annotation uses Chinese text when Chinese definitions are enabled; otherwise English
+  - end-of-chapter notes show `English | Chinese` when Chinese definitions are enabled; otherwise English only
+  - each normalized word is annotated once per chapter/document
+- For note compatibility, existing book footnote/noteref links are normalized to jump-link behavior and annotation skips note-related regions.
+- EPUB export signature includes annotation settings + version to force regeneration after annotation logic changes.
 - The app already includes user-friendly failure messages for upload/download/analysis problems.
 - `streamlit` is pinned to `1.41.1`.
 - The app depends on `beautifulsoup4`, `ebooklib`, `spacy`, `nltk`, `wordfreq`, `pandas`, and optional `cedict`.
@@ -105,18 +118,19 @@ Current deployment target is Azure:
 
 ## TODO
 
-- Investigate whether Chinese definitions are underloaded when the UI language starts in English and the user turns Chinese definitions on later.
-- Improve EPUB annotation formatting so the exported book preserves layout and chapter styling better.
-- Consider a more natural annotation style than plain text suffixes after unknown words.
+- Add regression tests for:
+  - annotation setting combinations (inline/endnote on/off)
+  - Chinese toggle effects on inline vs endnote text
+  - original-book footnote jump behavior after export
+- Validate exported EPUB behavior across readers (Apple Books / Kindle app / Kobo / Readium), especially note references.
 - Add PDF extraction / PDF annotation support if the EPUB flow stabilizes.
 - Revisit upload size limits; 100 MB may be a better ceiling if backend limits allow it.
 
 ## Known issues
 
 - Occasional upload `400` errors still happen, although Azure sticky sessions reduced them.
-- Chinese-definition loading can be inconsistent depending on initial UI language and cached state.
-- The current EPUB annotation export does not fully preserve original styling; chapter headings and line breaks may render too plain.
-- The current annotation placement is functional but not visually ideal.
+- EPUB reader compatibility still varies by app/device, especially for note rendering details.
+- Inline annotations can look dense for some books/readers; users can disable inline mode and keep endnotes only.
 
 ## Useful commands
 
