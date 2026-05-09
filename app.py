@@ -625,8 +625,10 @@ def chapter_index(chapter: dict) -> int:
         return 0
 
 
-def chapter_label(chapter: dict, hide_undefined_words: bool) -> str:
-    if hide_undefined_words:
+def chapter_label(
+    chapter: dict, hide_undefined_words: bool, use_chinese_definition: bool = False
+) -> str:
+    if hide_undefined_words and not use_chinese_definition:
         count = sum(
             1
             for row in chapter.get("oov_words", [])
@@ -652,8 +654,10 @@ def chapter_window(
         return chapters
 
 
-def chapter_has_visible_oov(chapter: dict, hide_undefined_words: bool) -> bool:
-    if hide_undefined_words:
+def chapter_has_visible_oov(
+    chapter: dict, hide_undefined_words: bool, use_chinese_definition: bool = False
+) -> bool:
+    if hide_undefined_words and not use_chinese_definition:
         return any(
             row.get("definition", "").strip() for row in chapter.get("oov_words", [])
         )
@@ -954,7 +958,9 @@ if analysis_result:
         single_chapter_indices = [
             idx
             for idx, chapter in enumerate(chapters)
-            if chapter_has_visible_oov(chapter, hide_undefined_words)
+            if chapter_has_visible_oov(
+                chapter, hide_undefined_words, show_chinese_definitions
+            )
         ]
         if not single_chapter_indices:
             single_chapter_indices = chapter_indices
@@ -971,7 +977,7 @@ if analysis_result:
                 single_chapter_indices,
                 key="single_chapter_index",
                 format_func=lambda idx: chapter_label(
-                    chapters[idx], hide_undefined_words
+                    chapters[idx], hide_undefined_words, show_chinese_definitions
                 ),
             )
         selected_chapters = chapters[single_index : single_index + 1]
@@ -983,7 +989,7 @@ if analysis_result:
                 chapter_indices,
                 key="chapter_start_index",
                 format_func=lambda idx: chapter_label(
-                    chapters[idx], hide_undefined_words
+                    chapters[idx], hide_undefined_words, show_chinese_definitions
                 ),
             )
         end_options = chapter_indices[start_index:]
@@ -995,17 +1001,16 @@ if analysis_result:
                 end_options,
                 key="chapter_end_index",
                 format_func=lambda idx: chapter_label(
-                    chapters[idx], hide_undefined_words
+                    chapters[idx], hide_undefined_words, show_chinese_definitions
                 ),
             )
         selected_chapters = chapter_window(chapters, start_index, end_index)
         st.caption(t("range_help"))
 
     rows = flatten_oov_rows(selected_chapters)
-    if hide_undefined_words:
-        rows = [row for row in rows if row.get("definition", "").strip()]
     if search_term:
         rows = [row for row in rows if search_term in row["word"].lower()]
+
     if show_chinese_definitions and rows:
         unique_words = {row["word"] for row in rows if row.get("word", "").strip()}
         with st.spinner(
@@ -1019,6 +1024,16 @@ if analysis_result:
     else:
         for row in rows:
             row.pop("definition_zh", None)
+
+    if hide_undefined_words:
+        if show_chinese_definitions:
+            rows = [
+                row
+                for row in rows
+                if (row.get("definition_zh") or row.get("definition", "")).strip()
+            ]
+        else:
+            rows = [row for row in rows if row.get("definition", "").strip()]
     visible_unique_oov_words = len({row["word"] for row in rows})
     table_rows = [
         {key: value for key, value in row.items() if key != "context"}
