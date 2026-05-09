@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import base64
 import hashlib
 import html
 import io
@@ -110,6 +111,8 @@ TEXT = {
         "selectable_words": "Copyable word list",
         "download_anki": "Download Anki TSV",
         "download_annotated_epub": "Download annotated EPUB",
+        "download_annotated_epub_direct_link": "Click here to download directly.",
+        "download_annotated_epub_direct_hint": "If the button still fails, use this direct link:",
         "prepare_annotated_epub": "Prepare annotated EPUB",
         "unique_words": "Unique words",
         "chapters": "Chapters",
@@ -173,6 +176,8 @@ TEXT = {
         "selectable_words": "可复制单词列表",
         "download_anki": "下载 Anki TSV",
         "download_annotated_epub": "下载带释义 EPUB",
+        "download_annotated_epub_direct_link": "点这里直接下载。",
+        "download_annotated_epub_direct_hint": "如果按钮仍然下载失败，请使用这个直接链接：",
         "prepare_annotated_epub": "生成带释义 EPUB",
         "unique_words": "唯一词数",
         "chapters": "章节数",
@@ -320,16 +325,12 @@ def analysis_input_config(
     remove_stopwords: bool,
     remove_proper_nouns: bool,
     min_token_length: int,
-    vocab_size: int,
-    custom_vocab_hash: str | None,
 ) -> dict:
     return {
         "upload_hash": epub_hash,
         "remove_stopwords": remove_stopwords,
         "remove_proper_nouns": remove_proper_nouns,
         "min_token_length": min_token_length,
-        "vocab_size": vocab_size,
-        "custom_vocab_hash": custom_vocab_hash,
     }
 
 
@@ -402,6 +403,26 @@ def export_text_payload(text: str) -> bytes:
 def annotated_epub_download_name(source_name: str | None) -> str:
     stem = Path(source_name or "").stem.strip() or "Book"
     return f"{stem} (BookVocab version).epub"
+
+
+def render_direct_download_link(
+    *,
+    label: str,
+    data: bytes,
+    file_name: str,
+    mime: str,
+) -> None:
+    encoded = base64.b64encode(data).decode("ascii")
+    safe_label = html.escape(label)
+    safe_name = html.escape(file_name, quote=True)
+    st.markdown(
+        (
+            f'<a download="{safe_name}" '
+            f'href="data:{mime};base64,{encoded}" '
+            f'style="text-decoration:underline;">{safe_label}</a>'
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def format_annotation_definition_text(
@@ -1048,11 +1069,6 @@ with st.sidebar:
         st.session_state["custom_vocab_name"] = custom_vocab.name
     else:
         custom_vocab_text = st.session_state.get("custom_vocab_text")
-    custom_vocab_hash = (
-        hashlib.sha256(custom_vocab_text.encode("utf-8")).hexdigest()
-        if custom_vocab_text
-        else None
-    )
 analysis_result: dict | None = None
 analysis_meta: dict | None = None
 
@@ -1061,8 +1077,6 @@ current_input_config = analysis_input_config(
     remove_stopwords,
     remove_proper_nouns,
     min_token_length,
-    vocab_size,
-    custom_vocab_hash,
 )
 
 stored = st.session_state.get("analysis_result")
@@ -1330,6 +1344,7 @@ if analysis_result:
     ).hexdigest()
     if st.session_state.get("annotated_epub_signature") != export_signature:
         st.session_state.pop("annotated_epub_bytes", None)
+        st.session_state.pop("show_annotated_epub_direct_link", None)
         st.session_state["annotated_epub_signature"] = export_signature
 
     table = pd.DataFrame(table_rows)
@@ -1421,19 +1436,30 @@ if analysis_result:
         else "生成前可在侧边栏调整注释设置。"
     )
     if annotated_epub_bytes:
-        epub_action_slot.download_button(
+        download_name = annotated_epub_download_name(active_epub_name)
+        primary_clicked = epub_action_slot.download_button(
             t("download_annotated_epub"),
             data=annotated_epub_bytes,
-            file_name=annotated_epub_download_name(active_epub_name),
+            file_name=download_name,
             mime="application/epub+zip",
             key="download_annotated_epub_ready",
             type="primary",
         )
+        if primary_clicked:
+            st.session_state["show_annotated_epub_direct_link"] = True
         st.caption(
             "The file is ready to download, please click the button above"
             if st.session_state.get("ui_lang", "en") == "en"
             else "文件已准备好下载，请点击上面的按钮"
         )
+        if st.session_state.get("show_annotated_epub_direct_link", False):
+            st.caption(t("download_annotated_epub_direct_hint"))
+            render_direct_download_link(
+                label=t("download_annotated_epub_direct_link"),
+                data=annotated_epub_bytes,
+                file_name=download_name,
+                mime="application/epub+zip",
+            )
     elif epub_action_slot.button(
         t("prepare_annotated_epub"), key="annotated_epub_action", type="primary"
     ):
@@ -1465,23 +1491,35 @@ if analysis_result:
                         progress_bar=progress,
                     )
                     st.session_state["annotated_epub_bytes"] = annotated_epub_bytes
+                    st.session_state["show_annotated_epub_direct_link"] = False
                 progress.empty()
                 show_status_toast(
                     "Annotated EPUB is ready.",
                     "带释义 EPUB 已准备好。",
                 )
-                epub_action_slot.download_button(
+                download_name = annotated_epub_download_name(active_epub_name)
+                primary_clicked = epub_action_slot.download_button(
                     t("download_annotated_epub"),
                     data=annotated_epub_bytes,
-                    file_name=annotated_epub_download_name(active_epub_name),
+                    file_name=download_name,
                     mime="application/epub+zip",
                     key="download_annotated_epub_ready_now",
                     type="primary",
                 )
+                if primary_clicked:
+                    st.session_state["show_annotated_epub_direct_link"] = True
                 st.caption(
                     "The file is ready to download, please click the button above"
                     if st.session_state.get("ui_lang", "en") == "en"
                     else "文件已准备好下载，请点击上面的按钮"
                 )
+                if st.session_state.get("show_annotated_epub_direct_link", False):
+                    st.caption(t("download_annotated_epub_direct_hint"))
+                    render_direct_download_link(
+                        label=t("download_annotated_epub_direct_link"),
+                        data=annotated_epub_bytes,
+                        file_name=download_name,
+                        mime="application/epub+zip",
+                    )
             except Exception as exc:
                 st.error(friendly_failure_message("Annotated EPUB export", exc))
