@@ -545,7 +545,7 @@ def apply_known_words_to_analysis(result: AnalysisResult | dict, known_words: se
                         "first_index": (chapter_oov or {}).get("first_index", 0),
                     }
                 else:
-                    existing["freq"] = max(int(existing["freq"]), freq)
+                    existing["freq"] = int(existing["freq"]) + int(freq)
                 total_oov_words += freq
         chapter_copy = dict(chapter)
         chapter_copy["oov_words"] = sorted(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import csv
 import hashlib
 import html
@@ -13,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
+from bs4 import BeautifulSoup, NavigableString
 
 try:
     import ebooklib
@@ -41,6 +40,8 @@ from epub_analyzer import (
 
 
 logger = logging.getLogger("bookvocab")
+
+ANNOTATION_EXPORT_VERSION = 2
 
 
 st.set_page_config(
@@ -82,6 +83,10 @@ TEXT = {
         "show_freq": "Show frequencies",
         "show_zh_definition": "Show Chinese dictionary definitions",
         "chinese_definition": "Chinese definition",
+        "annotation_settings": "Annotation settings",
+        "annotation_mode_inline": "Inline definition",
+        "annotation_mode_endnote": "End-of-chapter notes",
+        "upload_retry_hint": "If upload fails (for example, a 400 error), please try uploading again.",
         "reading_fit": "Reading fit",
         "reading_comfortable": "Comfortable reading",
         "reading_manageable": "Good learning material",
@@ -141,6 +146,10 @@ TEXT = {
         "show_freq": "显示频率",
         "show_zh_definition": "显示中文词典释义",
         "chinese_definition": "中文释义",
+        "annotation_settings": "注释设置",
+        "annotation_mode_inline": "行内释义",
+        "annotation_mode_endnote": "章节末尾注释",
+        "upload_retry_hint": "如果上传失败（例如 400 错误），请重新上传一次。",
         "reading_fit": "阅读适配",
         "reading_comfortable": "轻松阅读",
         "reading_manageable": "适合学习",
@@ -174,7 +183,7 @@ TEXT = {
         "word": "单词",
         "definition": "释义",
         "frequency": "频率",
-        "context": "语境",
+        "context": "上下文",
         "book_order_note": "单词按在书中出现的顺序显示。",
         "row_hint": "点击每行最左侧即可在下方查看上下文。",
     },
@@ -296,15 +305,6 @@ def translate_word_to_zh(word: str) -> str:
     return ""
 
 
-def write_upload_to_tempfile(uploaded_file) -> Path:
-    suffix = Path(uploaded_file.name).suffix or ".epub"
-    if suffix.lower() == ".zip":
-        suffix = ".epub"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        return Path(tmp.name)
-
-
 def store_uploaded_file(
     uploaded_file, *, bytes_key: str, name_key: str, hash_key: str
 ) -> bytes:
@@ -313,10 +313,6 @@ def store_uploaded_file(
     st.session_state[name_key] = uploaded_file.name
     st.session_state[hash_key] = hashlib.sha256(data).hexdigest()
     return data
-
-
-def fingerprint_upload(uploaded_file) -> str:
-    return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
 
 
 def analysis_input_config(
@@ -408,49 +404,158 @@ def annotated_epub_download_name(source_name: str | None) -> str:
     return f"{stem} (BookVocab version).epub"
 
 
-def trigger_browser_download(data: bytes, file_name: str, mime: str) -> None:
-    encoded = base64.b64encode(data).decode("ascii")
-    safe_name = html.escape(file_name, quote=True)
-    components.html(
-        f"""
-        <a id="bookvocab-download" download="{safe_name}" href="data:{mime};base64,{encoded}"></a>
-        <script>
-          const link = document.getElementById("bookvocab-download");
-          if (link) {{
-            setTimeout(() => link.click(), 0);
-          }}
-        </script>
-        """,
-        height=0,
-    )
+def format_annotation_definition_text(
+    en_definition: str, zh_definition: str, mode: str, show_chinese_definitions: bool
+) -> str:
+    en_text = (en_definition or "").strip()
+    zh_text = (zh_definition or "").strip()
+
+    if not show_chinese_definitions:
+        return en_text
+    if mode == "inline":
+        return zh_text or en_text
+    if mode == "endnote":
+        if en_text and zh_text:
+            return f"{en_text} | {zh_text}"
+        return en_text or zh_text
+    return en_text or zh_text
 
 
 def chapter_definition_map(
-    chapter: dict, *, use_chinese_definition: bool
-) -> dict[str, str]:
-    mapping: dict[str, str] = {}
+    chapter: dict,
+    *,
+    show_chinese_definitions: bool,
+    zh_definition_map: dict[str, str] | None = None,
+) -> dict[str, dict[str, str]]:
+    mapping: dict[str, dict[str, str]] = {}
+    need_zh = show_chinese_definitions
     for row in chapter.get("oov_words", []):
         word = row.get("word", "").strip().lower()
         if not word:
             continue
-        definition = ""
-        if use_chinese_definition:
-            definition = translate_word_to_zh(word) or row.get("definition", "")
+
+        en_definition = (row.get("definition", "") or "").strip()
+        if need_zh:
+            if zh_definition_map is not None:
+                zh_definition = (zh_definition_map.get(word, "") or "").strip()
+            else:
+                zh_definition = translate_word_to_zh(word).strip()
         else:
-            definition = row.get("definition", "")
-        if definition.strip():
-            mapping[word] = definition.strip()
+            zh_definition = ""
+        inline_definition = format_annotation_definition_text(
+            en_definition,
+            zh_definition,
+            mode="inline",
+            show_chinese_definitions=show_chinese_definitions,
+        )
+        endnote_definition = format_annotation_definition_text(
+            en_definition,
+            zh_definition,
+            mode="endnote",
+            show_chinese_definitions=show_chinese_definitions,
+        )
+        if not inline_definition and not endnote_definition:
+            continue
+
+        mapping[word] = {
+            "inline": inline_definition,
+            "endnote": endnote_definition,
+        }
     return mapping
 
 
-def annotate_text_for_epub(text: str, definitions: dict[str, str]) -> str:
-    if not text:
-        return "<p></p>"
+ANNOTATION_SKIP_TAGS = {
+    "a",
+    "code",
+    "head",
+    "link",
+    "math",
+    "meta",
+    "nav",
+    "noscript",
+    "ol",
+    "pre",
+    "script",
+    "style",
+    "sub",
+    "sup",
+    "ul",
+    "li",
+    "svg",
+    "textarea",
+    "title",
+}
 
-    nlp = load_spacy_model()
+NOTE_RELATED_HINTS = ("noteref", "footnote", "endnote", "rearnote", "annotation")
+
+
+def _is_note_related_element(tag) -> bool:
+    if tag is None:
+        return False
+    epub_type = str(tag.get("epub:type", "") or "").lower()
+    role = str(tag.get("role", "") or "").lower()
+    element_id = str(tag.get("id", "") or "").lower()
+    classes = tag.get("class", []) or []
+    if isinstance(classes, str):
+        classes = [classes]
+    class_text = " ".join(str(item).lower() for item in classes)
+
+    searchable = [epub_type, role, element_id, class_text]
+    return any(hint in value for value in searchable for hint in NOTE_RELATED_HINTS)
+
+
+def _normalize_existing_note_links(soup: BeautifulSoup) -> None:
+    # Preserve source-book note behavior as plain jump links.
+    for anchor in soup.find_all("a"):
+        epub_type = str(anchor.get("epub:type", "") or "").lower()
+        role = str(anchor.get("role", "") or "").lower()
+        is_note_ref = "noteref" in epub_type or "doc-noteref" in role
+        if not is_note_ref:
+            continue
+        for attr in ("epub:type", "role", "title", "data-footnote", "data-note"):
+            if anchor.has_attr(attr):
+                del anchor[attr]
+
+
+def _should_skip_annotation_node(node: NavigableString) -> bool:
+    if not str(node).strip():
+        return True
+    for ancestor in node.parents:
+        name = getattr(ancestor, "name", "")
+        if not name:
+            continue
+        if name.lower() in ANNOTATION_SKIP_TAGS:
+            return True
+        if _is_note_related_element(ancestor):
+            return True
+        classes = getattr(ancestor, "get", lambda *_: [])("class", []) or []
+        if isinstance(classes, str):
+            classes = [classes]
+        if (
+            "bookvocab-note" in classes
+            or "bookvocab-note-gloss" in classes
+            or "bookvocab-note-term" in classes
+            or "bookvocab-note-ref" in classes
+            or "bookvocab-note-inline" in classes
+            or "bookvocab-notes" in classes
+        ):
+            return True
+    return False
+
+
+def _annotate_text_fragment_for_epub(
+    text: str,
+    *,
+    definitions: dict[str, dict[str, str]],
+    show_inline: bool,
+    show_endnote: bool,
+    seen_words: set[str],
+    notes: list[dict[str, str]],
+    nlp,
+) -> tuple[str, bool]:
     doc = nlp(text)
     parts: list[str] = []
-    seen_words: set[str] = set()
+    changed = False
 
     for token in doc:
         if token.is_space:
@@ -464,32 +569,161 @@ def annotate_text_for_epub(text: str, definitions: dict[str, str]) -> str:
             token.lemma_ if token.lemma_ and token.lemma_ != "-PRON-" else token.text
         )
         normalized = normalize_word_form(lemma)
-        gloss = definitions.get(normalized, "")
-        if gloss and normalized not in seen_words:
-            token_text = html.escape(token.text)
-            token_ws = html.escape(token.whitespace_)
-            gloss_html = html.escape(gloss)
-            parts.append(
-                f'<span style="text-decoration:underline;">{token_text}</span>'
-                f" [{gloss_html}]{token_ws}"
-            )
-            seen_words.add(normalized)
-        else:
+        definition_entry = definitions.get(normalized, {})
+        inline_gloss = (definition_entry.get("inline", "") or "").strip()
+        endnote_gloss = (definition_entry.get("endnote", "") or "").strip()
+        if (not inline_gloss and not endnote_gloss) or normalized in seen_words:
             parts.append(html.escape(token.text_with_ws))
+            continue
 
-    body = "".join(parts).replace("\n", "<br/>")
-    return (
-        '<html xmlns="http://www.w3.org/1999/xhtml">'
-        "<head>"
-        '<meta charset="utf-8"/>'
-        "<style>"
-        "body{font-family:serif;line-height:1.6;margin:1em;}"
-        "p{margin:0 0 1em 0;}"
-        "</style>"
-        "</head><body><p>"
-        f"{body}"
-        "</p></body></html>"
+        token_text = html.escape(token.text)
+        token_ws = html.escape(token.whitespace_)
+        term_html = (
+            '<span class="bookvocab-note-term" '
+            'style="text-decoration:underline;text-decoration-style:dotted;'
+            'text-decoration-color:#b45309;">'
+            f"{token_text}</span>"
+        )
+
+        marker_html = ""
+        if show_endnote and endnote_gloss:
+            note_number = len(notes) + 1
+            note_id = f"bookvocab-note-{note_number}"
+            ref_id = f"bookvocab-note-ref-{note_number}"
+            marker_html = (
+                f'<sup class="bookvocab-note-ref" id="{ref_id}" '
+                'style="font-size:0.72em;vertical-align:super;line-height:0;'
+                'margin-left:0.08em;">'
+                f'<a href="#{note_id}"'
+                ' style="text-decoration:none;color:#8a5a00;">'
+                f"{note_number}</a></sup>"
+            )
+            notes.append(
+                {
+                    "note_id": note_id,
+                    "ref_id": ref_id,
+                    "word": token.text,
+                    "gloss": endnote_gloss,
+                }
+            )
+
+        inline_html = ""
+        if show_inline and inline_gloss:
+            inline_html = (
+                '<span class="bookvocab-note-inline" '
+                'style="font-size:0.78em;color:#6b4e16;margin-left:0.25em;">'
+                f"{html.escape(inline_gloss)}"
+                "</span>"
+            )
+
+        parts.append(f"{term_html}{marker_html}{inline_html}{token_ws}")
+        seen_words.add(normalized)
+        changed = True
+
+    return "".join(parts), changed
+
+
+def _append_epub_notes_section(soup: BeautifulSoup, notes: list[dict[str, str]]) -> None:
+    if not notes:
+        return
+
+    body = soup.find("body")
+    if body is None:
+        body = soup
+
+    section = soup.new_tag(
+        "section",
+        attrs={
+            "class": "bookvocab-notes",
+            "style": "margin-top:1.2em;padding-top:0.8em;border-top:1px solid #d8d8d8;",
+        },
     )
+    heading = soup.new_tag(
+        "p",
+        attrs={"style": "margin:0 0 0.5em 0;font-weight:600;color:#6b4e16;"},
+    )
+    heading.string = "Vocabulary Notes / 注释"
+    section.append(heading)
+
+    ordered = soup.new_tag("ol", attrs={"style": "margin:0;padding-left:1.25em;"})
+    for note in notes:
+        item = soup.new_tag(
+            "li",
+            attrs={"id": note["note_id"], "style": "margin:0 0 0.35em 0;"},
+        )
+        word = soup.new_tag("strong")
+        word.string = note["word"]
+        item.append(word)
+        item.append(": ")
+        item.append(note["gloss"])
+        item.append(" ")
+        back = soup.new_tag(
+            "a",
+            href=f"#{note['ref_id']}",
+            attrs={"style": "text-decoration:none;color:#8a5a00;"},
+        )
+        back.string = "↩"
+        item.append(back)
+        ordered.append(item)
+    section.append(ordered)
+    body.append(section)
+
+
+def annotate_html_for_epub(
+    html_content: bytes | str,
+    *,
+    definitions: dict[str, dict[str, str]],
+    show_inline_annotation: bool,
+    show_endnote_annotation: bool,
+    nlp,
+) -> bytes:
+    if html_content is None:
+        source_html = ""
+    else:
+        source_html = (
+            html_content.decode("utf-8", errors="ignore")
+            if isinstance(html_content, bytes)
+            else str(html_content)
+        )
+    if not source_html or not definitions:
+        return source_html.encode("utf-8")
+
+    try:
+        if not show_inline_annotation and not show_endnote_annotation:
+            return source_html.encode("utf-8")
+        soup = BeautifulSoup(source_html, "html.parser")
+        _normalize_existing_note_links(soup)
+        seen_words: set[str] = set()
+        notes: list[dict[str, str]] = []
+        text_nodes = [
+            node
+            for node in soup.find_all(string=True)
+            if isinstance(node, NavigableString) and not _should_skip_annotation_node(node)
+        ]
+        for text_node in text_nodes:
+            annotated_html, changed = _annotate_text_fragment_for_epub(
+                str(text_node),
+                definitions=definitions,
+                show_inline=show_inline_annotation,
+                show_endnote=show_endnote_annotation,
+                seen_words=seen_words,
+                notes=notes,
+                nlp=nlp,
+            )
+            if not changed:
+                continue
+            fragment = BeautifulSoup(annotated_html, "html.parser")
+            replacement_nodes = list(fragment.contents)
+            if not replacement_nodes:
+                continue
+            for replacement in reversed(replacement_nodes):
+                text_node.insert_after(replacement)
+            text_node.extract()
+        if show_endnote_annotation:
+            _append_epub_notes_section(soup, notes)
+        return str(soup).encode("utf-8")
+    except Exception:
+        return source_html.encode("utf-8")
 
 
 def build_annotated_epub_bytes(
@@ -497,7 +731,9 @@ def build_annotated_epub_bytes(
     *,
     source_epub_bytes: bytes,
     source_epub_name: str,
-    use_chinese_definition: bool,
+    show_inline_annotation: bool,
+    show_endnote_annotation: bool,
+    show_chinese_definitions: bool,
     progress_bar=None,
 ) -> bytes:
     if ebooklib_epub is None:
@@ -517,15 +753,36 @@ def build_annotated_epub_bytes(
         document_items = [
             item for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
         ]
+        zh_definition_map: dict[str, str] | None = None
+        if show_chinese_definitions:
+            unique_words = {
+                (row.get("word", "") or "").strip().lower()
+                for chapter in chapter_results
+                for row in chapter.get("oov_words", [])
+                if (row.get("word", "") or "").strip()
+            }
+            zh_definition_map = {
+                word: translate_word_to_zh(word)
+                for word in unique_words
+            }
+        nlp = load_spacy_model()
         for chapter_index, (chapter, item) in enumerate(
             zip(chapter_results, document_items), start=1
         ):
             defs = chapter_definition_map(
-                chapter, use_chinese_definition=use_chinese_definition
+                chapter,
+                show_chinese_definitions=show_chinese_definitions,
+                zh_definition_map=zh_definition_map,
             )
-            item.content = annotate_text_for_epub(chapter.get("text", ""), defs)
+            item.content = annotate_html_for_epub(
+                item.get_content(),
+                definitions=defs,
+                show_inline_annotation=show_inline_annotation,
+                show_endnote_annotation=show_endnote_annotation,
+                nlp=nlp,
+            )
             if progress_bar is not None:
-                total = max(len(chapter_results), 1)
+                total = max(min(len(chapter_results), len(document_items)), 1)
                 progress_bar.progress(min(chapter_index / total, 1.0))
         book.add_item(ebooklib_epub.EpubNcx())
         book.add_item(ebooklib_epub.EpubNav())
@@ -764,6 +1021,19 @@ with st.sidebar:
     st.session_state["_last_ui_lang"] = ui_lang
     hide_front_matter = st.checkbox(t("hide_front_matter"), value=False)
     show_frequencies = st.checkbox(t("show_freq"), value=False)
+    if "show_inline_annotation" not in st.session_state:
+        st.session_state["show_inline_annotation"] = True
+    if "show_endnote_annotation" not in st.session_state:
+        st.session_state["show_endnote_annotation"] = True
+    st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
+    st.markdown(f"**{t('annotation_settings')}**")
+    show_inline_annotation = st.checkbox(
+        t("annotation_mode_inline"), key="show_inline_annotation"
+    )
+    show_endnote_annotation = st.checkbox(
+        t("annotation_mode_endnote"), key="show_endnote_annotation"
+    )
+    st.markdown("<div style='margin-top:0.35rem;'></div>", unsafe_allow_html=True)
     min_token_length = 3
     custom_vocab = st.file_uploader(
         t("optional_vocab"), type=["txt", "csv"], key="vocab"
@@ -797,6 +1067,9 @@ stored_input_config = st.session_state.get("analysis_input_config")
 
 active_epub_bytes = uploaded_epub_bytes
 active_epub_name = uploaded_epub_name
+
+if not (active_epub_bytes and active_epub_name):
+    st.caption(t("upload_retry_hint"))
 
 if active_epub_bytes and active_epub_name:
     if st.button(t("analyze"), type="primary"):
@@ -1043,7 +1316,10 @@ if analysis_result:
         json.dumps(
             {
                 "config": current_input_config,
+                "annotation_export_version": ANNOTATION_EXPORT_VERSION,
                 "show_chinese_definitions": show_chinese_definitions,
+                "show_inline_annotation": show_inline_annotation,
+                "show_endnote_annotation": show_endnote_annotation,
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -1136,6 +1412,11 @@ if analysis_result:
 
     annotated_epub_bytes = st.session_state.get("annotated_epub_bytes")
     epub_action_slot = st.empty()
+    st.caption(
+        "Adjust annotation settings in the sidebar before generating."
+        if st.session_state.get("ui_lang", "en") == "en"
+        else "生成前可在侧边栏调整注释设置。"
+    )
     if annotated_epub_bytes:
         epub_action_slot.download_button(
             t("download_annotated_epub"),
@@ -1175,7 +1456,9 @@ if analysis_result:
                         analysis_result,
                         source_epub_bytes=active_epub_bytes,
                         source_epub_name=active_epub_name,
-                        use_chinese_definition=show_chinese_definitions,
+                        show_inline_annotation=show_inline_annotation,
+                        show_endnote_annotation=show_endnote_annotation,
+                        show_chinese_definitions=show_chinese_definitions,
                         progress_bar=progress,
                     )
                     st.session_state["annotated_epub_bytes"] = annotated_epub_bytes
